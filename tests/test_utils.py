@@ -2,6 +2,8 @@ import pytest
 
 from letta.constants import MAX_FILENAME_LENGTH
 from letta.functions.ast_parsers import coerce_dict_args_by_annotations, get_function_annotations_from_source
+from letta.schemas.file import FileMetadata
+from letta.services.file_processor.chunker.line_chunker import LineChunker
 from letta.services.helpers.agent_manager_helper import safe_format
 from letta.utils import sanitize_filename
 
@@ -282,21 +284,21 @@ def test_coerce_dict_args_with_default_arguments():
 
 def test_valid_filename():
     filename = "valid_filename.txt"
-    sanitized = sanitize_filename(filename)
+    sanitized = sanitize_filename(filename, add_uuid_suffix=True)
     assert sanitized.startswith("valid_filename_")
     assert sanitized.endswith(".txt")
 
 
 def test_filename_with_special_characters():
     filename = "invalid:/<>?*ƒfilename.txt"
-    sanitized = sanitize_filename(filename)
+    sanitized = sanitize_filename(filename, add_uuid_suffix=True)
     assert sanitized.startswith("ƒfilename_")
     assert sanitized.endswith(".txt")
 
 
 def test_null_byte_in_filename():
     filename = "valid\0filename.txt"
-    sanitized = sanitize_filename(filename)
+    sanitized = sanitize_filename(filename, add_uuid_suffix=True)
     assert "\0" not in sanitized
     assert sanitized.startswith("validfilename_")
     assert sanitized.endswith(".txt")
@@ -304,13 +306,13 @@ def test_null_byte_in_filename():
 
 def test_path_traversal_characters():
     filename = "../../etc/passwd"
-    sanitized = sanitize_filename(filename)
+    sanitized = sanitize_filename(filename, add_uuid_suffix=True)
     assert sanitized.startswith("passwd_")
     assert len(sanitized) <= MAX_FILENAME_LENGTH
 
 
 def test_empty_filename():
-    sanitized = sanitize_filename("")
+    sanitized = sanitize_filename("", add_uuid_suffix=True)
     assert sanitized.startswith("_")
 
 
@@ -326,20 +328,32 @@ def test_dotdot_as_filename():
 
 def test_long_filename():
     filename = "a" * (MAX_FILENAME_LENGTH + 10) + ".txt"
-    sanitized = sanitize_filename(filename)
+    sanitized = sanitize_filename(filename, add_uuid_suffix=True)
     assert len(sanitized) <= MAX_FILENAME_LENGTH
     assert sanitized.endswith(".txt")
 
 
 def test_unique_filenames():
     filename = "duplicate.txt"
-    sanitized1 = sanitize_filename(filename)
-    sanitized2 = sanitize_filename(filename)
+    sanitized1 = sanitize_filename(filename, add_uuid_suffix=True)
+    sanitized2 = sanitize_filename(filename, add_uuid_suffix=True)
     assert sanitized1 != sanitized2
     assert sanitized1.startswith("duplicate_")
     assert sanitized2.startswith("duplicate_")
     assert sanitized1.endswith(".txt")
     assert sanitized2.endswith(".txt")
+
+
+def test_basic_sanitization_no_suffix():
+    """Test the new behavior - basic sanitization without UUID suffix"""
+    filename = "test_file.txt"
+    sanitized = sanitize_filename(filename)
+    assert sanitized == "test_file.txt"
+
+    # Test with special characters
+    filename_with_chars = "test:/<>?*file.txt"
+    sanitized_chars = sanitize_filename(filename_with_chars)
+    assert sanitized_chars == "file.txt"
 
 
 def test_formatter():
@@ -395,3 +409,103 @@ def test_formatter():
     """
 
     assert UNUSED_AND_EMPRY_VAR_SOL == safe_format(UNUSED_AND_EMPRY_VAR, VARS_DICT)
+
+
+# ---------------------- LineChunker TESTS ---------------------- #
+
+
+def test_line_chunker_valid_range():
+    """Test that LineChunker works correctly with valid ranges"""
+    file = FileMetadata(file_name="test.py", source_id="test_source", content="line1\nline2\nline3\nline4")
+    chunker = LineChunker()
+
+    # Test valid range with validation
+    result = chunker.chunk_text(file, start=1, end=3, validate_range=True)
+    # Should return lines 2 and 3 (0-indexed 1:3)
+    assert "[Viewing lines 2 to 3 (out of 4 lines)]" in result[0]
+    assert "2: line2" in result[1]
+    assert "3: line3" in result[2]
+
+
+def test_line_chunker_valid_range_no_validation():
+    """Test that LineChunker works the same without validation for valid ranges"""
+    file = FileMetadata(file_name="test.py", source_id="test_source", content="line1\nline2\nline3\nline4")
+    chunker = LineChunker()
+
+    # Test same range without validation
+    result = chunker.chunk_text(file, start=1, end=3, validate_range=False)
+    assert "[Viewing lines 2 to 3 (out of 4 lines)]" in result[0]
+    assert "2: line2" in result[1]
+    assert "3: line3" in result[2]
+
+
+def test_line_chunker_out_of_range_start():
+    """Test that LineChunker throws error when start is out of range"""
+    file = FileMetadata(file_name="test.py", source_id="test_source", content="line1\nline2\nline3")
+    chunker = LineChunker()
+
+    # Test with start beyond file length (3 lines, requesting start=5 which is 0-indexed 4)
+    with pytest.raises(ValueError, match="File test.py has only 3 lines, but requested offset 6 is out of range"):
+        chunker.chunk_text(file, start=5, end=6, validate_range=True)
+
+
+def test_line_chunker_out_of_range_end():
+    """Test that LineChunker throws error when end extends beyond file bounds"""
+    file = FileMetadata(file_name="test.py", source_id="test_source", content="line1\nline2\nline3")
+    chunker = LineChunker()
+
+    # Test with end beyond file length (3 lines, requesting 1 to 10)
+    with pytest.raises(ValueError, match="File test.py has only 3 lines, but requested range 1 to 10 extends beyond file bounds"):
+        chunker.chunk_text(file, start=0, end=10, validate_range=True)
+
+
+def test_line_chunker_edge_case_empty_file():
+    """Test that LineChunker handles empty files correctly"""
+    file = FileMetadata(file_name="empty.py", source_id="test_source", content="")
+    chunker = LineChunker()
+
+    # Test requesting lines from empty file
+    with pytest.raises(ValueError, match="File empty.py has only 0 lines, but requested offset 1 is out of range"):
+        chunker.chunk_text(file, start=0, end=1, validate_range=True)
+
+
+def test_line_chunker_edge_case_single_line():
+    """Test that LineChunker handles single line files correctly"""
+    file = FileMetadata(file_name="single.py", source_id="test_source", content="only line")
+    chunker = LineChunker()
+
+    # Test valid single line access
+    result = chunker.chunk_text(file, start=0, end=1, validate_range=True)
+    assert "1: only line" in result[1]
+
+    # Test out of range for single line file
+    with pytest.raises(ValueError, match="File single.py has only 1 lines, but requested offset 2 is out of range"):
+        chunker.chunk_text(file, start=1, end=2, validate_range=True)
+
+
+def test_line_chunker_validation_disabled_allows_out_of_range():
+    """Test that when validation is disabled, out of range silently returns partial results"""
+    file = FileMetadata(file_name="test.py", source_id="test_source", content="line1\nline2\nline3")
+    chunker = LineChunker()
+
+    # Test with validation disabled - should not raise error
+    result = chunker.chunk_text(file, start=5, end=10, validate_range=False)
+    # Should return empty content (except metadata header) since slice is out of bounds
+    assert len(result) == 1  # Only metadata header
+    assert "[Viewing lines 6 to 10 (out of 3 lines)]" in result[0]
+
+
+def test_line_chunker_only_start_parameter():
+    """Test validation with only start parameter specified"""
+    file = FileMetadata(file_name="test.py", source_id="test_source", content="line1\nline2\nline3")
+    chunker = LineChunker()
+
+    # Test valid start only
+    result = chunker.chunk_text(file, start=1, validate_range=True)
+    assert "[Viewing lines 2 to end (out of 3 lines)]" in result[0]
+    assert "2: line2" in result[1]
+    assert "3: line3" in result[2]
+
+    # Test invalid start only
+    with pytest.raises(ValueError, match="File test.py has only 3 lines, but requested offset 4 is out of range"):
+        chunker.chunk_text(file, start=3, validate_range=True)

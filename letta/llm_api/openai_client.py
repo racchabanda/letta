@@ -216,6 +216,10 @@ class OpenAIClient(LLMClientBase):
             # NOTE: the reasoners that don't support temperature require 1.0, not None
             temperature=llm_config.temperature if supports_temperature_param(model) else 1.0,
         )
+
+        if llm_config.frequency_penalty is not None:
+            data.frequency_penalty = llm_config.frequency_penalty
+
         if tools and supports_parallel_tool_calling(model):
             data.parallel_tool_calls = False
 
@@ -261,6 +265,7 @@ class OpenAIClient(LLMClientBase):
         """
         kwargs = await self._prepare_client_kwargs_async(llm_config)
         client = AsyncOpenAI(**kwargs)
+
         response: ChatCompletion = await client.chat.completions.create(**request_data)
         return response.model_dump()
 
@@ -304,7 +309,7 @@ class OpenAIClient(LLMClientBase):
         return response_stream
 
     @trace_method
-    async def request_embeddings(self, inputs: List[str], embedding_config: EmbeddingConfig) -> List[dict]:
+    async def request_embeddings(self, inputs: List[str], embedding_config: EmbeddingConfig) -> List[List[float]]:
         """Request embeddings given texts and embedding config"""
         kwargs = self._prepare_client_kwargs_embedding(embedding_config)
         client = AsyncOpenAI(**kwargs)

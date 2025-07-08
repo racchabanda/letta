@@ -6,6 +6,7 @@ from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from letta.local_llm.constants import DEFAULT_WRAPPER_NAME
+from letta.services.summarizer.enums import SummarizationMode
 
 
 class ToolSettings(BaseSettings):
@@ -38,6 +39,18 @@ class ToolSettings(BaseSettings):
 class SummarizerSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="letta_summarizer_", extra="ignore")
 
+    # mode: SummarizationMode = SummarizationMode.STATIC_MESSAGE_BUFFER
+    mode: SummarizationMode = SummarizationMode.PARTIAL_EVICT_MESSAGE_BUFFER
+    message_buffer_limit: int = 60
+    message_buffer_min: int = 15
+    enable_summarization: bool = True
+    max_summarization_retries: int = 3
+
+    # partial evict summarizer percentage
+    # eviction based on percentage of message count, not token count
+    partial_evict_summarizer_percentage: float = 0.30
+
+    # TODO(cliandy): the below settings are tied to old summarization and should be deprecated or moved
     # Controls if we should evict all messages
     # TODO: Can refactor this into an enum if we have a bunch of different kinds of summarizers
     evict_all_messages: bool = False
@@ -211,8 +224,9 @@ class Settings(BaseSettings):
     otel_preferred_temporality: Optional[int] = Field(
         default=1, ge=0, le=2, description="Exported metric temporality. {0: UNSPECIFIED, 1: DELTA, 2: CUMULATIVE}"
     )
-    disable_tracing: bool = False
-    llm_api_logging: bool = True
+    disable_tracing: bool = Field(default=False, description="Disable OTEL Tracing")
+    llm_api_logging: bool = Field(default=True, description="Enable LLM API logging at each step")
+    track_last_agent_run: bool = Field(default=False, description="Update last agent run metrics")
 
     # uvicorn settings
     uvicorn_workers: int = 1
@@ -233,7 +247,7 @@ class Settings(BaseSettings):
     # cron job parameters
     enable_batch_job_polling: bool = False
     poll_running_llm_batches_interval_seconds: int = 5 * 60
-    poll_lock_retry_interval_seconds: int = 5 * 60
+    poll_lock_retry_interval_seconds: int = 8 * 60
     batch_job_polling_lookback_weeks: int = 2
     batch_job_polling_batch_size: Optional[int] = None
 
@@ -243,6 +257,13 @@ class Settings(BaseSettings):
     # LLM request timeout settings (model + embedding model)
     llm_request_timeout_seconds: float = Field(default=60.0, ge=10.0, le=1800.0, description="Timeout for LLM requests in seconds")
     llm_stream_timeout_seconds: float = Field(default=60.0, ge=10.0, le=1800.0, description="Timeout for LLM streaming requests in seconds")
+
+    # For embeddings
+    enable_pinecone: bool = False
+    pinecone_api_key: Optional[str] = None
+    pinecone_source_index: Optional[str] = "sources"
+    pinecone_agent_index: Optional[str] = "recall"
+    upsert_pinecone_indices: bool = False
 
     @property
     def letta_pg_uri(self) -> str:

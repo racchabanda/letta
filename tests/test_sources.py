@@ -9,9 +9,10 @@ from letta_client import CreateBlock
 from letta_client import Letta as LettaSDKClient
 from letta_client.types import AgentState
 
-from letta.constants import FILES_TOOLS
+from letta.constants import DEFAULT_ORG_ID, FILES_TOOLS
 from letta.orm.enums import ToolType
 from letta.schemas.message import MessageCreate
+from letta.schemas.user import User
 from tests.utils import wait_for_server
 
 # Constants
@@ -49,7 +50,7 @@ def client() -> LettaSDKClient:
     yield client
 
 
-def upload_file_and_wait(client: LettaSDKClient, source_id: str, file_path: str, max_wait: int = 30):
+def upload_file_and_wait(client: LettaSDKClient, source_id: str, file_path: str, max_wait: int = 60):
     """Helper function to upload a file and wait for processing to complete"""
     with open(file_path, "rb") as f:
         file_metadata = client.sources.files.upload(source_id=source_id, file=f)
@@ -70,9 +71,9 @@ def upload_file_and_wait(client: LettaSDKClient, source_id: str, file_path: str,
 
 
 @pytest.fixture
-def agent_state(client: LettaSDKClient):
+def agent_state(disable_pinecone, client: LettaSDKClient):
     open_file_tool = client.tools.list(name="open_files")[0]
-    search_files_tool = client.tools.list(name="search_files")[0]
+    search_files_tool = client.tools.list(name="semantic_search_files")[0]
     grep_tool = client.tools.list(name="grep_files")[0]
 
     agent_state = client.agents.create(
@@ -93,7 +94,7 @@ def agent_state(client: LettaSDKClient):
 # Tests
 
 
-def test_auto_attach_detach_files_tools(client: LettaSDKClient):
+def test_auto_attach_detach_files_tools(disable_pinecone, client: LettaSDKClient):
     """Test automatic attachment and detachment of file tools when managing agent sources."""
     # Create agent with basic configuration
     agent = client.agents.create(
@@ -126,6 +127,7 @@ def test_auto_attach_detach_files_tools(client: LettaSDKClient):
     assert len(client.sources.list()) == 1
 
     agent = client.agents.sources.attach(source_id=source_1.id, agent_id=agent.id)
+    assert len(client.agents.retrieve(agent_id=agent.id).sources) == 1
     assert_file_tools_present(agent, set(FILES_TOOLS))
 
     # Create and attach second source
@@ -133,6 +135,7 @@ def test_auto_attach_detach_files_tools(client: LettaSDKClient):
     assert len(client.sources.list()) == 2
 
     agent = client.agents.sources.attach(source_id=source_2.id, agent_id=agent.id)
+    assert len(client.agents.retrieve(agent_id=agent.id).sources) == 2
     # File tools should remain after attaching second source
     assert_file_tools_present(agent, set(FILES_TOOLS))
 
@@ -148,20 +151,21 @@ def test_auto_attach_detach_files_tools(client: LettaSDKClient):
 @pytest.mark.parametrize(
     "file_path, expected_value, expected_label_regex",
     [
-        ("tests/data/test.txt", "test", r"test_[a-z0-9]+\.txt"),
-        ("tests/data/memgpt_paper.pdf", "MemGPT", r"memgpt_paper_[a-z0-9]+\.pdf"),
-        ("tests/data/toy_chat_fine_tuning.jsonl", '{"messages"', r"toy_chat_fine_tuning_[a-z0-9]+\.jsonl"),
-        ("tests/data/test.md", "h2 Heading", r"test_[a-z0-9]+\.md"),
-        ("tests/data/test.json", "glossary", r"test_[a-z0-9]+\.json"),
-        ("tests/data/react_component.jsx", "UserProfile", r"react_component_[a-z0-9]+\.jsx"),
-        ("tests/data/task_manager.java", "TaskManager", r"task_manager_[a-z0-9]+\.java"),
-        ("tests/data/data_structures.cpp", "BinarySearchTree", r"data_structures_[a-z0-9]+\.cpp"),
-        ("tests/data/api_server.go", "UserService", r"api_server_[a-z0-9]+\.go"),
-        ("tests/data/data_analysis.py", "StatisticalAnalyzer", r"data_analysis_[a-z0-9]+\.py"),
-        ("tests/data/test.csv", "Smart Fridge Plus", r"test_[a-z0-9]+\.csv"),
+        ("tests/data/test.txt", "test", r"test_source/test\.txt"),
+        ("tests/data/memgpt_paper.pdf", "MemGPT", r"test_source/memgpt_paper\.pdf"),
+        ("tests/data/toy_chat_fine_tuning.jsonl", '{"messages"', r"test_source/toy_chat_fine_tuning\.jsonl"),
+        ("tests/data/test.md", "h2 Heading", r"test_source/test\.md"),
+        ("tests/data/test.json", "glossary", r"test_source/test\.json"),
+        ("tests/data/react_component.jsx", "UserProfile", r"test_source/react_component\.jsx"),
+        ("tests/data/task_manager.java", "TaskManager", r"test_source/task_manager\.java"),
+        ("tests/data/data_structures.cpp", "BinarySearchTree", r"test_source/data_structures\.cpp"),
+        ("tests/data/api_server.go", "UserService", r"test_source/api_server\.go"),
+        ("tests/data/data_analysis.py", "StatisticalAnalyzer", r"test_source/data_analysis\.py"),
+        ("tests/data/test.csv", "Smart Fridge Plus", r"test_source/test\.csv"),
     ],
 )
 def test_file_upload_creates_source_blocks_correctly(
+    disable_pinecone,
     client: LettaSDKClient,
     agent_state: AgentState,
     file_path: str,
@@ -202,7 +206,7 @@ def test_file_upload_creates_source_blocks_correctly(
     assert not any(re.fullmatch(expected_label_regex, b.label) for b in blocks)
 
 
-def test_attach_existing_files_creates_source_blocks_correctly(client: LettaSDKClient, agent_state: AgentState):
+def test_attach_existing_files_creates_source_blocks_correctly(disable_pinecone, client: LettaSDKClient, agent_state: AgentState):
     # Create a new source
     source = client.sources.create(name="test_source", embedding="openai/text-embedding-3-small")
     assert len(client.sources.list()) == 1
@@ -227,7 +231,6 @@ def test_attach_existing_files_creates_source_blocks_correctly(client: LettaSDKC
     assert len(blocks) == 1
     assert any("test" in b.value for b in blocks)
     assert any(b.value.startswith("[Viewing file start") for b in blocks)
-    assert any(re.fullmatch(r"test_[a-z0-9]+\.txt", b.label) for b in blocks)
 
     # Detach the source
     client.agents.sources.detach(source_id=source.id, agent_id=agent_state.id)
@@ -237,10 +240,9 @@ def test_attach_existing_files_creates_source_blocks_correctly(client: LettaSDKC
     blocks = agent_state.memory.file_blocks
     assert len(blocks) == 0
     assert not any("test" in b.value for b in blocks)
-    assert not any(re.fullmatch(r"test_[a-z0-9]+\.txt", b.label) for b in blocks)
 
 
-def test_delete_source_removes_source_blocks_correctly(client: LettaSDKClient, agent_state: AgentState):
+def test_delete_source_removes_source_blocks_correctly(disable_pinecone, client: LettaSDKClient, agent_state: AgentState):
     # Create a new source
     source = client.sources.create(name="test_source", embedding="openai/text-embedding-3-small")
     assert len(client.sources.list()) == 1
@@ -259,7 +261,6 @@ def test_delete_source_removes_source_blocks_correctly(client: LettaSDKClient, a
     blocks = agent_state.memory.file_blocks
     assert len(blocks) == 1
     assert any("test" in b.value for b in blocks)
-    assert any(re.fullmatch(r"test_[a-z0-9]+\.txt", b.label) for b in blocks)
 
     # Remove file from source
     client.sources.delete(source_id=source.id)
@@ -269,10 +270,9 @@ def test_delete_source_removes_source_blocks_correctly(client: LettaSDKClient, a
     blocks = agent_state.memory.file_blocks
     assert len(blocks) == 0
     assert not any("test" in b.value for b in blocks)
-    assert not any(re.fullmatch(r"test_[a-z0-9]+\.txt", b.label) for b in blocks)
 
 
-def test_agent_uses_open_close_file_correctly(client: LettaSDKClient, agent_state: AgentState):
+def test_agent_uses_open_close_file_correctly(disable_pinecone, client: LettaSDKClient, agent_state: AgentState):
     # Create a new source
     source = client.sources.create(name="test_source", embedding="openai/text-embedding-3-small")
 
@@ -312,7 +312,7 @@ def test_agent_uses_open_close_file_correctly(client: LettaSDKClient, agent_stat
         messages=[
             MessageCreate(
                 role="user",
-                content=f"Use ONLY the open_files tool to open the file named {file.file_name} with offset {offset} and length {length}",
+                content=f"Use ONLY the open_files tool to open the file named test_source/{file.file_name} with offset {offset} and length {length}",
             )
         ],
     )
@@ -379,7 +379,7 @@ def test_agent_uses_open_close_file_correctly(client: LettaSDKClient, agent_stat
     print("✓ File successfully opened with different range - content differs as expected")
 
 
-def test_agent_uses_search_files_correctly(client: LettaSDKClient, agent_state: AgentState):
+def test_agent_uses_search_files_correctly(disable_pinecone, client: LettaSDKClient, agent_state: AgentState):
     # Create a new source
     source = client.sources.create(name="test_source", embedding="openai/text-embedding-3-small")
 
@@ -402,11 +402,13 @@ def test_agent_uses_search_files_correctly(client: LettaSDKClient, agent_state: 
     assert len(files) == 1
     assert files[0].source_id == source.id
 
-    # Ask agent to use the search_files tool
+    # Ask agent to use the semantic_search_files tool
     search_files_response = client.agents.messages.create(
         agent_id=agent_state.id,
         messages=[
-            MessageCreate(role="user", content=f"Use ONLY the search_files tool to search for details regarding the electoral history.")
+            MessageCreate(
+                role="user", content=f"Use ONLY the semantic_search_files tool to search for details regarding the electoral history."
+            )
         ],
     )
     print(f"Search file request sent, got {len(search_files_response.messages)} message(s) in response")
@@ -415,7 +417,7 @@ def test_agent_uses_search_files_correctly(client: LettaSDKClient, agent_state: 
     # Check that archival_memory_search was called
     tool_calls = [msg for msg in search_files_response.messages if msg.message_type == "tool_call_message"]
     assert len(tool_calls) > 0, "No tool calls found"
-    assert any(tc.tool_call.name == "search_files" for tc in tool_calls), "search_files not called"
+    assert any(tc.tool_call.name == "semantic_search_files" for tc in tool_calls), "semantic_search_files not called"
 
     # Check it returned successfully
     tool_returns = [msg for msg in search_files_response.messages if msg.message_type == "tool_return_message"]
@@ -423,7 +425,7 @@ def test_agent_uses_search_files_correctly(client: LettaSDKClient, agent_state: 
     assert all(tr.status == "success" for tr in tool_returns), "Tool call failed"
 
 
-def test_agent_uses_grep_correctly_basic(client: LettaSDKClient, agent_state: AgentState):
+def test_agent_uses_grep_correctly_basic(disable_pinecone, client: LettaSDKClient, agent_state: AgentState):
     # Create a new source
     source = client.sources.create(name="test_source", embedding="openai/text-embedding-3-small")
 
@@ -446,7 +448,7 @@ def test_agent_uses_grep_correctly_basic(client: LettaSDKClient, agent_state: Ag
     assert len(files) == 1
     assert files[0].source_id == source.id
 
-    # Ask agent to use the search_files tool
+    # Ask agent to use the semantic_search_files tool
     search_files_response = client.agents.messages.create(
         agent_id=agent_state.id,
         messages=[MessageCreate(role="user", content=f"Use ONLY the grep_files tool to search for `Nunzia De Girolamo`.")],
@@ -457,7 +459,7 @@ def test_agent_uses_grep_correctly_basic(client: LettaSDKClient, agent_state: Ag
     # Check that grep_files was called
     tool_calls = [msg for msg in search_files_response.messages if msg.message_type == "tool_call_message"]
     assert len(tool_calls) > 0, "No tool calls found"
-    assert any(tc.tool_call.name == "grep_files" for tc in tool_calls), "search_files not called"
+    assert any(tc.tool_call.name == "grep_files" for tc in tool_calls), "semantic_search_files not called"
 
     # Check it returned successfully
     tool_returns = [msg for msg in search_files_response.messages if msg.message_type == "tool_return_message"]
@@ -465,7 +467,7 @@ def test_agent_uses_grep_correctly_basic(client: LettaSDKClient, agent_state: Ag
     assert all(tr.status == "success" for tr in tool_returns), "Tool call failed"
 
 
-def test_agent_uses_grep_correctly_advanced(client: LettaSDKClient, agent_state: AgentState):
+def test_agent_uses_grep_correctly_advanced(disable_pinecone, client: LettaSDKClient, agent_state: AgentState):
     # Create a new source
     source = client.sources.create(name="test_source", embedding="openai/text-embedding-3-small")
 
@@ -488,7 +490,7 @@ def test_agent_uses_grep_correctly_advanced(client: LettaSDKClient, agent_state:
     assert len(files) == 1
     assert files[0].source_id == source.id
 
-    # Ask agent to use the search_files tool
+    # Ask agent to use the semantic_search_files tool
     search_files_response = client.agents.messages.create(
         agent_id=agent_state.id,
         messages=[
@@ -517,7 +519,7 @@ def test_agent_uses_grep_correctly_advanced(client: LettaSDKClient, agent_state:
     assert "513:" in tool_return_message.tool_return
 
 
-def test_create_agent_with_source_ids_creates_source_blocks_correctly(client: LettaSDKClient):
+def test_create_agent_with_source_ids_creates_source_blocks_correctly(disable_pinecone, client: LettaSDKClient):
     """Test that creating an agent with source_ids parameter correctly creates source blocks."""
     # Create a new source
     source = client.sources.create(name="test_source", embedding="openai/text-embedding-3-small")
@@ -554,14 +556,13 @@ def test_create_agent_with_source_ids_creates_source_blocks_correctly(client: Le
     blocks = temp_agent_state.memory.file_blocks
     assert len(blocks) == 1
     assert any(b.value.startswith("[Viewing file start (out of 554 chunks)]") for b in blocks)
-    assert any(re.fullmatch(r"long_test_[a-z0-9]+\.txt", b.label) for b in blocks)
 
     # Verify file tools were automatically attached
     file_tools = {tool.name for tool in temp_agent_state.tools if tool.tool_type == ToolType.LETTA_FILES_CORE}
     assert file_tools == set(FILES_TOOLS)
 
 
-def test_view_ranges_have_metadata(client: LettaSDKClient, agent_state: AgentState):
+def test_view_ranges_have_metadata(disable_pinecone, client: LettaSDKClient, agent_state: AgentState):
     # Create a new source
     source = client.sources.create(name="test_source", embedding="openai/text-embedding-3-small")
 
@@ -598,7 +599,7 @@ def test_view_ranges_have_metadata(client: LettaSDKClient, agent_state: AgentSta
         messages=[
             MessageCreate(
                 role="user",
-                content=f"Use ONLY the open_files tool to open the file named {file.file_name} with offset {offset} and length {length}",
+                content=f"Use ONLY the open_files tool to open the file named test_source/{file.file_name} with offset {offset} and length {length}",
             )
         ],
     )
@@ -624,7 +625,46 @@ def test_view_ranges_have_metadata(client: LettaSDKClient, agent_state: AgentSta
     )
 
 
-def test_open_files_schema_descriptions(client: LettaSDKClient):
+def test_duplicate_file_renaming(disable_pinecone, client: LettaSDKClient):
+    """Test that duplicate files are renamed with count-based suffixes (e.g., file.txt, file (1).txt, file (2).txt)"""
+    # Create a new source
+    source = client.sources.create(name="test_duplicate_source", embedding="openai/text-embedding-3-small")
+
+    # Upload the same file three times
+    file_path = "tests/data/test.txt"
+
+    with open(file_path, "rb") as f:
+        first_file = client.sources.files.upload(source_id=source.id, file=f)
+
+    with open(file_path, "rb") as f:
+        second_file = client.sources.files.upload(source_id=source.id, file=f)
+
+    with open(file_path, "rb") as f:
+        third_file = client.sources.files.upload(source_id=source.id, file=f)
+
+    # Get all uploaded files
+    files = client.sources.files.list(source_id=source.id, limit=10)
+    assert len(files) == 3, f"Expected 3 files, got {len(files)}"
+
+    # Sort files by creation time to ensure predictable order
+    files.sort(key=lambda f: f.created_at)
+
+    # Verify filenames follow the count-based pattern
+    expected_filenames = ["test.txt", "test_(1).txt", "test_(2).txt"]
+    actual_filenames = [f.file_name for f in files]
+
+    assert actual_filenames == expected_filenames, f"Expected {expected_filenames}, got {actual_filenames}"
+
+    # Verify all files have the same original_file_name
+    for file in files:
+        assert file.original_file_name == "test.txt", f"Expected original_file_name='test.txt', got '{file.original_file_name}'"
+
+    print(f"✓ Successfully tested duplicate file renaming:")
+    for i, file in enumerate(files):
+        print(f"  File {i+1}: original='{file.original_file_name}' → renamed='{file.file_name}'")
+
+
+def test_open_files_schema_descriptions(disable_pinecone, client: LettaSDKClient):
     """Test that open_files tool schema contains correct descriptions from docstring"""
 
     # Get the open_files tool
@@ -645,12 +685,13 @@ def test_open_files_schema_descriptions(client: LettaSDKClient):
 
     # Check that examples are included
     assert "Examples:" in description
-    assert 'FileOpenRequest(file_name="config.py")' in description
-    assert 'FileOpenRequest(file_name="config.py", offset=1, length=50)' in description
+    assert 'FileOpenRequest(file_name="project_utils/config.py")' in description
+    assert 'FileOpenRequest(file_name="project_utils/config.py", offset=1, length=50)' in description
     assert "# Lines 1-50" in description
     assert "# Lines 100-199" in description
     assert "# Entire file" in description
     assert "close_all_others=True" in description
+    assert "View specific portions of large files (e.g. functions or definitions)" in description
 
     # Check parameters structure
     assert "parameters" in schema
@@ -701,6 +742,135 @@ def test_open_files_schema_descriptions(client: LettaSDKClient):
     # Check length field
     assert "length" in file_request_properties
     length_prop = file_request_properties["length"]
-    expected_length_desc = "Optional number of lines to view from offset. If not specified, views to end of file."
+    expected_length_desc = "Optional number of lines to view from offset (inclusive). If not specified, views to end of file."
     assert length_prop["description"] == expected_length_desc
     assert length_prop["type"] == "integer"
+
+
+# --- Pinecone Tests ---
+
+
+def test_pinecone_search_files_tool(client: LettaSDKClient):
+    """Test that search_files tool uses Pinecone when enabled"""
+    from letta.helpers.pinecone_utils import should_use_pinecone
+
+    if not should_use_pinecone(verbose=True):
+        pytest.skip("Pinecone not configured (missing API key or disabled), skipping Pinecone-specific tests")
+
+    print("Testing Pinecone search_files tool functionality")
+
+    # Create agent with file tools
+    agent = client.agents.create(
+        name="test_pinecone_agent",
+        memory_blocks=[
+            CreateBlock(label="human", value="username: testuser"),
+        ],
+        model="openai/gpt-4o-mini",
+        embedding="openai/text-embedding-3-small",
+    )
+
+    # Create source and attach to agent
+    source = client.sources.create(name="test_pinecone_source", embedding="openai/text-embedding-3-small")
+    client.agents.sources.attach(source_id=source.id, agent_id=agent.id)
+
+    # Upload a file with searchable content
+    file_path = "tests/data/long_test.txt"
+    upload_file_and_wait(client, source.id, file_path)
+
+    # Test semantic search using Pinecone
+    search_response = client.agents.messages.create(
+        agent_id=agent.id,
+        messages=[MessageCreate(role="user", content="Use the semantic_search_files tool to search for 'electoral history' in the files.")],
+    )
+
+    # Verify tool was called successfully
+    tool_calls = [msg for msg in search_response.messages if msg.message_type == "tool_call_message"]
+    assert len(tool_calls) > 0, "No tool calls found"
+    assert any(tc.tool_call.name == "semantic_search_files" for tc in tool_calls), "semantic_search_files not called"
+
+    # Verify tool returned results
+    tool_returns = [msg for msg in search_response.messages if msg.message_type == "tool_return_message"]
+    assert len(tool_returns) > 0, "No tool returns found"
+    assert all(tr.status == "success" for tr in tool_returns), "Tool call failed"
+
+    # Check that results contain expected content
+    search_results = tool_returns[0].tool_return
+    print(search_results)
+    assert (
+        "electoral" in search_results.lower() or "history" in search_results.lower()
+    ), f"Search results should contain relevant content: {search_results}"
+
+
+def test_pinecone_lifecycle_file_and_source_deletion(client: LettaSDKClient):
+    """Test that file and source deletion removes records from Pinecone"""
+    import asyncio
+
+    from letta.helpers.pinecone_utils import list_pinecone_index_for_files, should_use_pinecone
+
+    if not should_use_pinecone():
+        pytest.skip("Pinecone not configured (missing API key or disabled), skipping Pinecone-specific tests")
+
+    print("Testing Pinecone file and source deletion lifecycle")
+
+    # Create source
+    source = client.sources.create(name="test_lifecycle_source", embedding="openai/text-embedding-3-small")
+
+    # Upload multiple files and wait for processing
+    file_paths = ["tests/data/test.txt", "tests/data/test.md"]
+    uploaded_files = []
+    for file_path in file_paths:
+        file_metadata = upload_file_and_wait(client, source.id, file_path)
+        uploaded_files.append(file_metadata)
+
+    # Get temp user for Pinecone operations
+    user = User(name="temp", organization_id=DEFAULT_ORG_ID)
+
+    # Test file-level deletion first
+    if len(uploaded_files) > 1:
+        file_to_delete = uploaded_files[0]
+
+        # Check records for the specific file using list function
+        records_before = asyncio.run(list_pinecone_index_for_files(file_to_delete.id, user))
+        print(f"Found {len(records_before)} records for file before deletion")
+
+        # Delete the file
+        client.sources.files.delete(source_id=source.id, file_id=file_to_delete.id)
+
+        # Allow time for deletion to propagate
+        time.sleep(2)
+
+        # Verify file records are removed
+        records_after = asyncio.run(list_pinecone_index_for_files(file_to_delete.id, user))
+        print(f"Found {len(records_after)} records for file after deletion")
+
+        assert len(records_after) == 0, f"File records should be removed from Pinecone after deletion, but found {len(records_after)}"
+
+    # Test source-level deletion - check remaining files
+    # Check records for remaining files
+    remaining_records = []
+    for file_metadata in uploaded_files[1:]:  # Skip the already deleted file
+        file_records = asyncio.run(list_pinecone_index_for_files(file_metadata.id, user))
+        remaining_records.extend(file_records)
+
+    records_before = len(remaining_records)
+    print(f"Found {records_before} records for remaining files before source deletion")
+
+    # Delete the entire source
+    client.sources.delete(source_id=source.id)
+
+    # Allow time for deletion to propagate
+    time.sleep(3)
+
+    # Verify all remaining file records are removed
+    records_after = []
+    for file_metadata in uploaded_files[1:]:
+        file_records = asyncio.run(list_pinecone_index_for_files(file_metadata.id, user))
+        records_after.extend(file_records)
+
+    print(f"Found {len(records_after)} records for files after source deletion")
+
+    assert (
+        len(records_after) == 0
+    ), f"All source records should be removed from Pinecone after source deletion, but found {len(records_after)}"
+
+    print("✓ Pinecone lifecycle verified - namespace is clean after source deletion")

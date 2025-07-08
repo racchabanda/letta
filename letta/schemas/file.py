@@ -30,6 +30,7 @@ class FileMetadata(FileMetadataBase):
     organization_id: Optional[str] = Field(None, description="The unique identifier of the organization associated with the document.")
     source_id: str = Field(..., description="The unique identifier of the source associated with the document.")
     file_name: Optional[str] = Field(None, description="The name of the file.")
+    original_file_name: Optional[str] = Field(None, description="The original name of the file as uploaded.")
     file_path: Optional[str] = Field(None, description="The path to the file.")
     file_type: Optional[str] = Field(None, description="The type of the file (MIME type).")
     file_size: Optional[int] = Field(None, description="The size of the file in bytes.")
@@ -40,6 +41,8 @@ class FileMetadata(FileMetadataBase):
         description="The current processing status of the file (e.g. pending, parsing, embedding, completed, error).",
     )
     error_message: Optional[str] = Field(default=None, description="Optional error message if the file failed processing.")
+    total_chunks: Optional[int] = Field(default=None, description="Total number of chunks for the file.")
+    chunks_embedded: Optional[int] = Field(default=None, description="Number of chunks that have been embedded.")
 
     # orm metadata, optional fields
     created_at: Optional[datetime] = Field(default_factory=datetime.utcnow, description="The creation date of the file.")
@@ -50,6 +53,10 @@ class FileMetadata(FileMetadataBase):
     content: Optional[str] = Field(
         default=None, description="Optional full-text content of the file; only populated on demand due to its size."
     )
+
+    def is_processing_terminal(self) -> bool:
+        """Check if the file processing status is in a terminal state (completed or error)."""
+        return self.processing_status in (FileProcessingStatus.COMPLETED, FileProcessingStatus.ERROR)
 
 
 class FileAgentBase(LettaBase):
